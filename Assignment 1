@@ -1,0 +1,139 @@
+import pandas as pd
+import numpy as np
+import time
+from geopy.distance import geodesic
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
+import warnings
+import os
+
+# === Suppress unnecessary warnings ===
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# === CSV file path ===
+file_path = r"C:\Users\Asus\Downloads\aisdk-2024-12-30\aisdk-2024-12-30.csv"
+
+# === Step 1: Read and preprocess data in chunks ===
+print("📦 Loading and cleaning data...")
+data_chunks = pd.read_csv(file_path, chunksize=5000)
+processed_data = []
+
+for chunk in data_chunks:
+    chunk.columns = chunk.columns.str.strip()  # Strip column names
+    chunk = chunk.dropna(subset=['Latitude', 'Longitude'])  # Remove rows with missing coordinates
+    chunk = chunk[(chunk['Latitude'] >= -90) & (chunk['Latitude'] <= 90)]  # Latitude bounds
+    chunk = chunk[(chunk['Longitude'] >= -180) & (chunk['Longitude'] <= 180)]  # Longitude bounds
+    processed_data.append(chunk)
+
+df = pd.concat(processed_data)
+df = df.sort_values(by=['MMSI', '# Timestamp'])
+
+print(f"✔ Data loaded: {len(df):,} rows after filtering.")
+
+# === Step 2: Identify spoofing behavior per vessel ===
+def detect_spoofing_behavior(group):
+    vessel_id = group['MMSI'].iloc[0]
+    irregularities = []
+    last_position = None
+    last_timestamp = None
+
+    for _, record in group.iterrows():
+        current_position = (record['Latitude'], record['Longitude'])
+        current_timestamp = record['# Timestamp']
+
+        if last_position:
+            dist_km = geodesic(last_position, current_position).km
+            time_diff_minutes = 1  # Assuming a 1-minute interval
+            velocity = dist_km / time_diff_minutes if time_diff_minutes else 0
+
+            if dist_km > 100 or velocity > 1000:
+                irregularities.append((vessel_id, current_timestamp, dist_km, velocity))
+
+        last_position = current_position
+        last_timestamp = current_timestamp
+
+    return irregularities
+
+# === Step 3: Sequential processing for anomaly detection ===
+def process_anomalies_sequential(dataframe):
+    anomalies = []
+    for _, group in dataframe.groupby('MMSI'):
+        anomalies.extend(detect_spoofing_behavior(group))
+    return anomalies
+
+# === Step 4: Parallel processing using threads ===
+def process_anomalies_parallel(dataframe, num_workers=4):
+    vessel_groups = [group for _, group in dataframe.groupby('MMSI')]
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        results = executor.map(detect_spoofing_behavior, vessel_groups)
+    return [item for sublist in results for item in sublist]
+
+# === Step 5: Time comparison for sequential vs parallel approaches ===
+def compare_time_performance(dataframe):
+    print("\n⏳ Running sequential processing...")
+    start_time = time.time()
+    sequential_anomalies = process_anomalies_sequential(dataframe)
+    sequential_end_time = time.time()
+
+    print("⚙ Running parallel processing...")
+    parallel_start_time = time.time()
+    parallel_anomalies = process_anomalies_parallel(dataframe, num_workers=4)
+    parallel_end_time = time.time()
+
+    sequential_duration = sequential_end_time - start_time
+    parallel_duration = parallel_end_time - parallel_start_time
+    efficiency_gain = sequential_duration / parallel_duration if parallel_duration > 0 else float('inf')
+
+    print(f"\n⏱ Sequential Time: {sequential_duration:.2f} seconds")
+    print(f"⚡ Parallel Time:   {parallel_duration:.2f} seconds")
+    print(f"🚀 Efficiency Gain: {efficiency_gain:.2f}x")
+
+    return sequential_anomalies, parallel_anomalies, sequential_duration, parallel_duration
+
+# === Step 6: Run the processing and comparison ===
+sequential_anomalies, parallel_anomalies, sequential_duration, parallel_duration = compare_time_performance(df)
+
+# === Step 7: Save detected anomalies to a CSV file ===
+output_filename = "detected_anomalies.csv"
+pd.DataFrame(sequential_anomalies, columns=["MMSI", "Timestamp", "Distance(km)", "Speed(km/h)"]).to_csv(output_filename, index=False)
+print(f"📁 Anomalies saved at: {output_filename}")
+
+# === Step 8: Plot comparison of processing times ===
+plt.figure(figsize=(6, 4))
+plt.bar(['Sequential', 'Parallel'], [sequential_duration, parallel_duration], color=['red', 'green'])
+plt.title("Time Comparison: Sequential vs Parallel")
+plt.ylabel("Time (seconds)")
+plt.tight_layout()
+plt.savefig("time_comparison.png")
+plt.close()
+os.startfile("time_comparison.png")  # ✅ Opens chart on Windows
+
+# === Step 9: Plot histogram for anomaly speeds ===
+anomalies_data = pd.read_csv(output_filename)
+
+plt.figure(figsize=(8, 4))
+plt.hist(anomalies_data["Speed(km/h)"], bins=30, color="orange", edgecolor="black")
+plt.title("Anomaly Speed Distribution")
+plt.xlabel("Speed (km/h)")
+plt.ylabel("Frequency")
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("speed_histogram.png")
+plt.close()
+os.startfile("speed_histogram.png")  # ✅ Opens chart on Windows
+
+# === Step 10: Plot bar chart for top 10 vessels with most anomalies ===
+top_vessels = anomalies_data["MMSI"].value_counts().head(10)
+
+plt.figure(figsize=(8, 4))
+top_vessels.plot(kind="bar", color="skyblue")
+plt.title("Top 10 Vessels with Most Anomalies")
+plt.xlabel("MMSI")
+plt.ylabel("Anomaly Count")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig("top_vessels_anomalies.png")
+plt.close()
+os.startfile("top_vessels_anomalies.png")  # ✅ Opens chart on Windows
+
+print("✅ All visualizations generated and opened successfully.")
